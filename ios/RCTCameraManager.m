@@ -36,6 +36,10 @@ RCT_EXPORT_MODULE();
     self.previewLayer.needsDisplayOnBoundsChange = YES;
   #endif
 
+  if (!self.lastCameraFrame) {
+    self.lastCameraFrame = [[CALayer alloc] init];
+  };
+
   if(!self.camera){
     self.camera = [[RCTCamera alloc] initWithManager:self bridge:self.bridge];
   }
@@ -431,6 +435,7 @@ RCT_EXPORT_METHOD(hasFlash:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRej
       self.presetCamera = AVCaptureDevicePositionBack;
     }
 
+    /*
     AVCaptureStillImageOutput *stillImageOutput = [[AVCaptureStillImageOutput alloc] init];
     if ([self.session canAddOutput:stillImageOutput])
     {
@@ -452,6 +457,18 @@ RCT_EXPORT_METHOD(hasFlash:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRej
       [self.session addOutput:metadataOutput];
       [metadataOutput setMetadataObjectTypes:self.barCodeTypes];
       self.metadataOutput = metadataOutput;
+    }
+    */
+
+    AVCaptureVideoDataOutput *videoDataOutput = [[AVCaptureVideoDataOutput alloc] init];
+    NSDictionary *newSettings = @{ (NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA) };
+    videoDataOutput.videoSettings = newSettings;
+    [videoDataOutput setAlwaysDiscardsLateVideoFrames:YES];
+
+    if ([self.session canAddOutput:videoDataOutput]) {
+      [videoDataOutput setSampleBufferDelegate:(id)self queue:self.sessionQueue];
+      [self.session addOutput:videoDataOutput];
+      self.videoDataOutput = videoDataOutput;
     }
 
     __weak RCTCameraManager *weakSelf = self;
@@ -913,6 +930,24 @@ didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL
   }
 }
 
+- (void)captureOutput:(AVCaptureOutput *)captureOutput
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection
+{
+    CFRetain(sampleBuffer);
+
+    [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+        // Now we're definitely on the main thread, so update the imageView:
+        UIImage *capturedImage = [self imageFromSampleBuffer:sampleBuffer];
+
+        [self.lastCameraFrame setContents: (id) capturedImage.CGImage];
+        [self.lastCameraFrame setBounds: self.camera.bounds];
+        [self.lastCameraFrame setFrame: self.camera.bounds];
+
+        CFRelease(sampleBuffer);
+    }];
+}
+
 
 - (AVCaptureDevice *)deviceWithMediaType:(NSString *)mediaType preferringPosition:(AVCaptureDevicePosition)position
 {
@@ -1033,6 +1068,48 @@ didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL
             [self.session commitConfiguration];
         }
     #endif
+}
+
+// Create a UIImage from sample buffer data
+- (UIImage *) imageFromSampleBuffer:(CMSampleBufferRef) sampleBuffer
+{
+    // Get a CMSampleBuffer's Core Video image buffer for the media data
+    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    // Lock the base address of the pixel buffer
+    CVPixelBufferLockBaseAddress(imageBuffer, 0);
+
+    // Get the number of bytes per row for the pixel buffer
+    void *baseAddress = CVPixelBufferGetBaseAddress(imageBuffer);
+
+    // Get the number of bytes per row for the pixel buffer
+    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer);
+    // Get the pixel buffer width and height
+    size_t width = CVPixelBufferGetWidth(imageBuffer);
+    size_t height = CVPixelBufferGetHeight(imageBuffer);
+
+    // Create a device-dependent RGB color space
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+
+    // Create a bitmap graphics context with the sample buffer data
+    CGContextRef context = CGBitmapContextCreate(baseAddress, width, height, 8,
+                                                 bytesPerRow, colorSpace, kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst);
+    // Create a Quartz image from the pixel data in the bitmap graphics context
+    CGImageRef quartzImage = CGBitmapContextCreateImage(context);
+    // Unlock the pixel buffer
+    CVPixelBufferUnlockBaseAddress(imageBuffer,0);
+
+
+    // Free up the context and color space
+    CGContextRelease(context);
+    CGColorSpaceRelease(colorSpace);
+
+    // Create an image object from the Quartz image
+    UIImage *image = [UIImage imageWithCGImage:quartzImage];
+
+    // Release the Quartz image
+    CGImageRelease(quartzImage);
+
+    return (image);
 }
 
 @end
